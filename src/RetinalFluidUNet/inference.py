@@ -12,6 +12,45 @@ from .feature_extraction import extract_multiclass_features
 from .noise_reduction import denoise_wavelet_dncnn
 
 
+def _afterprocess_mask(mask_bin, cropped_size, crop_coords, orig_full_size):
+    masks_to_return = []
+    # probs_single: numpy массив [C, H, W] (после sigmoid порог >0.5)
+    for cls_idx, cls_name in enumerate(CLASS_NAMES):
+        # Ресайз до размера обрезанного изображения
+        mask_cropped = cv2.resize(mask_bin[cls_idx], (cropped_size[1], cropped_size[0]),
+                                  interpolation=cv2.INTER_NEAREST)
+        if crop_coords is not None:
+            # Восстановление полного кадра
+            full_mask = np.zeros(orig_full_size, dtype=np.uint8)
+            y1, y2, x1, x2 = crop_coords
+            if mask_cropped.shape != (y2 - y1, x2 - x1):
+                mask_cropped = cv2.resize(mask_cropped, (x2 - x1, y2 - y1),
+                                          interpolation=cv2.INTER_NEAREST)
+            full_mask[y1:y2, x1:x2] = mask_cropped
+            masks_to_return.append(full_mask)
+        else:
+            masks_to_return.append(mask_cropped)
+
+    return np.stack(masks_to_return, axis=0)
+
+
+def _afterprocess_mask_batch(mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes):
+    if len(mask_bins.shape) < 4:
+        if mask_bins.shape == 2:
+            mask_bins = np.expand_dims(mask_bins, 0)
+        return _afterprocess_mask(mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes)
+
+    masks_to_return = []
+    for i in range(mask_bins.shape[0]):
+        mask_bin = mask_bins[i]
+        cropped_size = cropped_sizes[i]
+        crop_coords = crop_coords_s[i]
+        orig_full_size = orig_full_sizes[i]
+        mask_to_return = _afterprocess_mask(mask_bin, cropped_size, crop_coords, orig_full_size)
+        masks_to_return.append(mask_to_return)
+    return np.stack(masks_to_return, axis=0)
+
+
 class InferencePipeline:
     def __init__(
         self,
@@ -38,43 +77,6 @@ class InferencePipeline:
 
         return image
 
-    def _afterprocess_mask(self, mask_bin, cropped_size, crop_coords, orig_full_size):
-        masks_to_return = []
-        # probs_single: numpy массив [C, H, W] (после sigmoid порог >0.5)
-        for cls_idx, cls_name in enumerate(CLASS_NAMES):
-            # Ресайз до размера обрезанного изображения
-            mask_cropped = cv2.resize(mask_bin[cls_idx], (cropped_size[1], cropped_size[0]),
-                                      interpolation=cv2.INTER_NEAREST)
-            if crop_coords is not None:
-                # Восстановление полного кадра
-                full_mask = np.zeros(orig_full_size, dtype=np.uint8)
-                y1, y2, x1, x2 = crop_coords
-                if mask_cropped.shape != (y2 - y1, x2 - x1):
-                    mask_cropped = cv2.resize(mask_cropped, (x2 - x1, y2 - y1),
-                                              interpolation=cv2.INTER_NEAREST)
-                full_mask[y1:y2, x1:x2] = mask_cropped
-                masks_to_return.append(full_mask)
-            else:
-                masks_to_return.append(mask_cropped)
-
-        return np.stack(masks_to_return, axis=0)
-
-    def _afterprocess_mask_batch(self, mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes):
-        if len(mask_bins.shape) < 4:
-            if mask_bins.shape == 2:
-                mask_bins = np.expand_dims(mask_bins, 0)
-            return self._afterprocess_mask(mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes)
-
-        masks_to_return = []
-        for i in range(mask_bins.shape[0]):
-            mask_bin = mask_bins[i]
-            cropped_size = cropped_sizes[i]
-            crop_coords = crop_coords_s[i]
-            orig_full_size = orig_full_sizes[i]
-            mask_to_return = self._afterprocess_mask(mask_bin, cropped_size, crop_coords, orig_full_size)
-            masks_to_return.append(mask_to_return)
-        return np.stack(masks_to_return, axis=0)
-
     @torch.no_grad()
     def _predict_single(self, image):
         """Обработка одного изображения (строка, np.ndarray или PIL)."""
@@ -92,7 +94,7 @@ class InferencePipeline:
         features_scaled = scaler.transform(features)
         pred = self.classifier.predict(features_scaled)
 
-        mask_restored = self._afterprocess_mask(mask, cropped_size, crop_coords, orig_full_size)
+        mask_restored = _afterprocess_mask(mask, cropped_size, crop_coords, orig_full_size)
 
         return pred, mask_restored, features
 
@@ -130,7 +132,7 @@ class InferencePipeline:
         preds = self.classifier.predict(features_scaled)
 
         masks = np.stack(masks, axis=0)
-        masks_restored = self._afterprocess_mask_batch(masks, cropped_size_list, crop_coords_list, orig_full_size_list)
+        masks_restored = _afterprocess_mask_batch(masks, cropped_size_list, crop_coords_list, orig_full_size_list)
 
         return preds, masks_restored, features_df
 
