@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -6,7 +7,7 @@ from .initialisation.device import device
 from .transformations import inference_image_transform
 from .classificator.models import classifier as classification_model, scaler
 from .classificator.variables import *
-from .classificator.preprocess import preprocess_image
+from .classificator.preprocess import preprocess_image, remove_white_borders
 from .feature_extraction import extract_multiclass_features
 from .noise_reduction import denoise_wavelet_dncnn
 
@@ -37,11 +38,51 @@ class InferencePipeline:
 
         return image
 
+    def _afterprocess_mask(self, mask_bin, cropped_size, crop_coords, orig_full_size):
+        masks_to_return = []
+        # probs_single: numpy массив [C, H, W] (после sigmoid порог >0.5)
+        for cls_idx, cls_name in enumerate(CLASS_NAMES):
+            # Ресайз до размера обрезанного изображения
+            mask_cropped = cv2.resize(mask_bin[cls_idx], (cropped_size[1], cropped_size[0]),
+                                      interpolation=cv2.INTER_NEAREST)
+            if crop_coords is not None:
+                # Восстановление полного кадра
+                full_mask = np.zeros(orig_full_size, dtype=np.uint8)
+                y1, y2, x1, x2 = crop_coords
+                if mask_cropped.shape != (y2 - y1, x2 - x1):
+                    mask_cropped = cv2.resize(mask_cropped, (x2 - x1, y2 - y1),
+                                              interpolation=cv2.INTER_NEAREST)
+                full_mask[y1:y2, x1:x2] = mask_cropped
+                masks_to_return.append(full_mask)
+            else:
+                masks_to_return.append(mask_cropped)
+
+        return np.stack(masks_to_return, axis=0)
+
+    def _afterprocess_mask_batch(self, mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes):
+        if len(mask_bins.shape) < 4:
+            if mask_bins.shape == 2:
+                mask_bins = np.expand_dims(mask_bins, 0)
+            return self._afterprocess_mask(mask_bins, cropped_sizes, crop_coords_s, orig_full_sizes)
+
+        masks_to_return = []
+        for i in range(mask_bins.shape[0]):
+            mask_bin = mask_bins[i]
+            cropped_size = cropped_sizes[i]
+            crop_coords = crop_coords_s[i]
+            orig_full_size = orig_full_sizes[i]
+            mask_to_return = self._afterprocess_mask(mask_bin, cropped_size, crop_coords, orig_full_size)
+            masks_to_return.append(mask_to_return)
+        return np.stack(masks_to_return, axis=0)
+
     @torch.no_grad()
     def _predict_single(self, image):
         """Обработка одного изображения (строка, np.ndarray или PIL)."""
         img_np = self._load_image(image)
-        input_tensor, img_shape, crop_coords, orig_full_size = preprocess_image(img_np)
+        input_tensor, cropped_size, crop_coords, orig_full_size = preprocess_image(
+            image=img_np,
+            remove_borders_fn=remove_white_borders,
+        )
         input_tensor = input_tensor.to(self.device)
 
         seg_probs = self.seg_model(input_tensor)          # (1, C, H, W)
@@ -51,15 +92,26 @@ class InferencePipeline:
         features_scaled = scaler.transform(features)
         pred = self.classifier.predict(features_scaled)
 
-        return pred, mask, features
+        mask_restored = self._afterprocess_mask(mask, cropped_size, crop_coords, orig_full_size)
+
+        return pred, mask_restored, features
 
     @torch.no_grad()
     def _predict_batch(self, images):
         """Обработка списка изображений (каждое — str, np.ndarray или PIL)."""
         input_tensors = []
+        cropped_size_list = []
+        crop_coords_list = []
+        orig_full_size_list = []
         for img in images:
             img_np = self._load_image(img)
-            tensor, img_shape, crop_coords, orig_full_size = preprocess_image(img_np)
+            tensor, cropped_size, crop_coords, orig_full_size = preprocess_image(
+                image=img_np,
+                remove_borders_fn=remove_white_borders,
+            )
+            cropped_size_list.append(cropped_size)
+            crop_coords_list.append(crop_coords)
+            orig_full_size_list.append(orig_full_size)
             input_tensors.append(tensor)
 
         batch_tensor = torch.cat(input_tensors, dim=0).to(self.device)
@@ -77,7 +129,10 @@ class InferencePipeline:
         features_scaled = scaler.transform(features_df)
         preds = self.classifier.predict(features_scaled)
 
-        return preds, masks, features_df
+        masks = np.stack(masks, axis=0)
+        masks_restored = self._afterprocess_mask_batch(masks, cropped_size_list, crop_coords_list, orig_full_size_list)
+
+        return preds, masks_restored, features_df
 
     def predict(self, images):
         """
