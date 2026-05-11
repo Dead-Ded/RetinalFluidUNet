@@ -39,15 +39,25 @@ class DnCNN(nn.Module):
         return x - noise  # очищенное изображение в sqrt-пространстве
 
 
+# def anscombe_forward(x, alpha=1.0):
+#     """x ∈ [0,1] → y"""
+#     return (2.0 / alpha) * np.sqrt(alpha * x + 3.0 / 8.0 * alpha ** 2)
+#
+#
+# def anscombe_inverse(y, alpha=1.0):
+#     """y → x (clamp для безопасности)"""
+#     x = (alpha / 4.0) * y ** 2 - (3.0 / 8.0) * alpha
+#     return np.clip(x, 0, 1)
+
 def anscombe_forward(x, alpha=1.0):
     """x ∈ [0,1] → y"""
-    return (2.0 / alpha) * np.sqrt(alpha * x + 3.0 / 8.0 * alpha ** 2)
+    return x
 
 
 def anscombe_inverse(y, alpha=1.0):
     """y → x (clamp для безопасности)"""
     x = (alpha / 4.0) * y ** 2 - (3.0 / 8.0) * alpha
-    return np.clip(x, 0, 1)
+    return y
 
 
 def ensure_even(img: np.ndarray) -> np.ndarray:
