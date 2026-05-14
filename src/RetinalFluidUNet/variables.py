@@ -16,3 +16,4 @@ GOOD_MODELS = [
     # r"G:\Users\Neo Daniel\PycharmProjects\NIR\SavedModels\2026_05_03-14_16_19"
     BASE_DIR + r"\data"
 ]
+WAVELET = "db4"
